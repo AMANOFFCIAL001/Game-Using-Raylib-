@@ -1,1 +1,250 @@
+#include <stdio.h>
+#include <raylib.h>
+#include <math.h>
+#include <stdlib.h>
+#include <time.h>
+#include "score.h"
 
+#define PI 3.14159265358979323846f
+#define BACKGROUND_COLOR (Color){186, 149, 127}
+#define CAR_COLOR BLACK
+#define CAMERA_FOLLOW_THRESH 400
+#define MAX_SKIDMARKS 500
+#define SKIDMARK_TIME 3
+
+// Skidmark structure to store tire tracks
+typedef struct {
+    float left_tire_x;
+    float left_tire_y;
+    float right_tire_x;
+    float right_tire_y;
+    double time;
+} Skidmark;
+
+int main() {
+    // Initialize random seed for spawning coins
+    srand(time(NULL));
+    
+    // Window setup
+    int width = 1300;
+    int height = 700;
+    InitWindow(width, height, "Racer");
+    SetTargetFPS(60);
+
+    // World size (larger than screen)
+    int world_width = 5000;
+    int world_height = 5000;
+
+    // Load ground texture
+    Image soil_image = LoadImage("craftpix-889156-free-racing-game-kit/PNG/Background_Tiles/Soil_Tile.png");
+    ImageRotateCW(&soil_image);
+    Texture2D soil_texture = LoadTextureFromImage(soil_image);
+
+    // Load car texture
+    Image car_image = LoadImage("craftpix-889156-free-racing-game-kit/PNG/Car_1_Main_Positions/Car_1_01.png");
+    Texture2D car_texture = LoadTextureFromImage(car_image);
+    Rectangle car_texture_rec = {
+        .x = 0,
+        .y = 0,
+        .width = (float)car_texture.width,
+        .height = (float)car_texture.height,
+    };
+
+    // Coin and score system
+    Coin coins[MAX_COINS];
+    int score = 0;
+    float carRadius = 40;
+
+    // Car properties
+    int car_width = 80;
+    int car_length = 150;
+    float car_x = width/2 - car_width/2;
+    float car_y = height/2 - car_length/2;
+    float car_speed = 0;
+    float car_max_speed = 7;
+    int car_direction = -1;
+    float car_angle = 0;
+    float car_speedup = 10;
+    float car_slowdown = 0.97f;
+
+    // Drift angle for smooth drifting effect
+    float drift_angle = 0;
+
+    // Initialize coins around the car
+    InitCoins(coins, MAX_COINS, world_width, world_height, car_x, car_y);
+
+    // Drift settings
+    float drift_bias = 15;
+
+    // Steering settings
+    float steering = 0;
+    float steering_speed = 2;
+    float max_steering = 4;
+    float steer_back_speed = 0.04f;
+
+    // Skidmark tracking
+    Skidmark skidmarks[MAX_SKIDMARKS];
+    int skidmark_count = 0;
+
+    // Camera setup to follow car
+    Camera2D camera = {
+        .offset = (Vector2){ width/2.0f, height/2.0f },
+        .target = (Vector2){ car_x, car_y },
+        .rotation = 0,
+        .zoom = 1.0f,
+    };
+
+    // Main game loop
+    while( !WindowShouldClose() ) {
+        float dt = GetFrameTime();
+
+        // Handle acceleration (forward/backward)
+        if( IsKeyDown(KEY_UP) ) {
+            car_direction = -1;
+            car_speed += car_speedup * dt;
+            if( car_speed > car_max_speed ) {car_speed = car_max_speed;}
+        } else if( IsKeyDown(KEY_DOWN) ) {
+            car_direction = 1;
+            car_speed -= car_speedup * dt;
+            if( car_speed < -car_max_speed ) car_speed = -car_max_speed;
+        } else {
+            // Slow down when no key is pressed
+            car_speed = car_slowdown * car_speed;
+        }
+
+        // Handle steering (left/right)
+        if( IsKeyDown(KEY_LEFT) ) {
+            steering -= steering_speed * dt * fabsf(car_speed);
+            if( steering < -max_steering ) steering = -max_steering;
+        } else if( IsKeyDown(KEY_RIGHT) ) {
+            steering += steering_speed * dt * fabsf(car_speed);
+            if( steering > max_steering ) steering = max_steering;
+        }
+
+        // Gradually return steering to center
+        steering = steering * (1 - steer_back_speed);
+
+        // Update car angle based on steering
+        car_angle += steering;
+
+        // Smooth drift angle calculation
+        drift_angle = (car_angle + drift_angle * drift_bias) / (1 + drift_bias);
+
+        // Check if car is drifting
+        float drift_diff = drift_angle - car_angle;
+        bool drifting = fabsf(drift_diff) > 30.0f;
+
+        // Move car forward based on car angle
+        float radians = PI * (car_angle - 90.0f) / 180.0f;
+        car_x += car_speed * cosf(radians);
+        car_y += car_speed * sinf(radians);
+
+        // Add drift movement
+        radians = PI * (drift_angle - 90.0f) / 180.0f;
+        car_x += car_speed * cosf(radians);
+        car_y += car_speed * sinf(radians);
+
+        Vector2 carPos = { car_x, car_y };
+
+        // Update coins and check for collection
+        UpdateCoins(coins, MAX_COINS, carPos, carRadius, &score, world_width, world_height);
+
+        // Camera follows the car
+        camera.target = carPos;
+
+        // Keep camera within world bounds
+        float halfW = width * 0.5f;
+        float halfH = height * 0.5f;
+        if (camera.target.x < halfW) camera.target.x = halfW;
+        if (camera.target.x > (world_width - halfW)) camera.target.x = world_width - halfW;
+        if (camera.target.y < halfH) camera.target.y = halfH;
+        if (camera.target.y > (world_height - halfH)) camera.target.y = world_height - halfH;
+
+        // Start drawing
+        BeginDrawing();
+        ClearBackground(BACKGROUND_COLOR);
+
+        BeginMode2D(camera);
+
+        // Draw tiled ground texture
+        int tile_count_col = (int)ceilf((float)world_width / (float)soil_texture.width);
+        int tile_count_row = (int)ceilf((float)world_height / (float)soil_texture.height);
+
+        for( int x = 0; x < tile_count_col; x++ ) {
+            for( int y = 0; y < tile_count_row; y++ ) {
+                DrawTexture(soil_texture, x * soil_texture.width, y * soil_texture.height, WHITE);
+            }
+        }
+
+        // Create skidmarks when drifting
+        if( drifting ) {
+            // Calculate left tire position
+            radians = PI * (car_angle - 240.0f) / 180.0f;
+            float left_tire_x = car_x + (car_length / 2.6f) * cosf(radians);
+            float left_tire_y = car_y + (car_length / 2.6f) * sinf(radians);
+
+            // Calculate right tire position
+            radians = PI * (car_angle - 300.0f) / 180.0f;
+            float right_tire_x = car_x + (car_length / 2.6f) * cosf(radians);
+            float right_tire_y = car_y + (car_length / 2.6f) * sinf(radians);
+
+            // Store skidmark
+            skidmarks[skidmark_count % MAX_SKIDMARKS] = (Skidmark){
+                left_tire_x,
+                left_tire_y,
+                right_tire_x,
+                right_tire_y,
+                GetTime(),
+            };
+            skidmark_count++;
+        }
+
+        // Draw all skidmarks (that aren't too old)
+        for( int i = 0; i < skidmark_count && i < MAX_SKIDMARKS; i++ ) {
+            Skidmark skidmark = skidmarks[i];
+
+            double current_time = GetTime();
+            if( current_time - skidmark.time > SKIDMARK_TIME ) {
+                continue;  // Skip old skidmarks
+            }
+
+            DrawCircle((int)skidmark.left_tire_x, (int)skidmark.left_tire_y, 6, BLACK);
+            DrawCircle((int)skidmark.right_tire_x, (int)skidmark.right_tire_y, 6, BLACK);
+        }
+
+        // Draw coins
+        DrawCoins(coins, MAX_COINS);
+
+        // Draw car on top of everything
+        Rectangle car_rec = {
+            .x = car_x,
+            .y = car_y,
+            .width = (float)car_width,
+            .height = (float)car_length,
+        };
+        Vector2 car_origin = {
+            .x = car_width/2.0f,
+            .y = car_length/2.0f,
+        };
+
+        DrawTexturePro(car_texture, car_texture_rec, car_rec, car_origin, car_angle, WHITE);
+
+        EndMode2D();
+
+        // Draw score on screen (not affected by camera)
+        DrawText(TextFormat("Score: %d", score), 20, 20, 40, BLACK);
+
+        EndDrawing();
+    }
+
+    // Clean up resources
+    UnloadTexture(car_texture);
+    UnloadImage(car_image);
+
+    UnloadTexture(soil_texture);
+    UnloadImage(soil_image);
+
+    CloseWindow();
+
+    return 0;
+}
